@@ -21,19 +21,15 @@ class RefEntry:
     shape: Tuple[int, int]  # (h, w)
 
 
-# -----------------------------
-# Paths / cache
-# -----------------------------
+
+# Paths
 ROOT = Path(__file__).resolve().parents[2]  # repo root
 REFS_DIR = ROOT / "data" / "refs"
 _REFS_CACHE: Optional[List[RefEntry]] = None
 
 
-# -----------------------------
-# Helpers
-# -----------------------------
+
 def _sift():
-    # Requires opencv-contrib-python in many environments
     return cv2.SIFT_create()
 
 
@@ -99,7 +95,6 @@ def _load_refs(max_dim: int = 900, max_kp: int = 800) -> List[RefEntry]:
     if not refs:
         raise RuntimeError(
             "Ingen gyldige reference-features fundet. "
-            "Brug skarpere label-crops eller større refs."
         )
 
     return refs
@@ -118,7 +113,6 @@ def _mutual_good_matches(desc_ref: np.ndarray, desc_img: np.ndarray, ratio: floa
       - ref -> img (ratio)
       - img -> ref (ratio)
       - keep only pairs that agree (mutual)
-    This typically reduces false positives a lot.
     """
     bf = cv2.BFMatcher(cv2.NORM_L2, crossCheck=False)
 
@@ -175,12 +169,11 @@ def _project_ref_corners(ref_shape_hw: Tuple[int, int], H: np.ndarray) -> np.nda
     h, w = ref_shape_hw
     corners = np.float32([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]]).reshape(-1, 1, 2)
     proj = cv2.perspectiveTransform(corners, H)
-    return proj  # shape (4,1,2)
+    return proj
 
 
-# -----------------------------
+
 # Main API
-# -----------------------------
 def detect(image_bgr: np.ndarray) -> Tuple[str, float, dict]:
     """
     Returnerer:
@@ -201,13 +194,13 @@ def detect(image_bgr: np.ndarray) -> Tuple[str, float, dict]:
     if desc_img is None or kp_img is None or len(kp_img) < 10:
         return "unknown", 0.0, {"reason": "no_features"}
 
-    ratio = 0.72
+    ratio = 0.77
     ransac_thresh = 5.0
 
     # Track best per brand by inliers
     best_inliers_per_brand: Dict[str, int] = {}
 
-    # Track global best (for visualization)
+    # Track global best
     best_brand = "unknown"
     best_inliers = 0
     best_ref: Optional[RefEntry] = None
@@ -225,7 +218,7 @@ def detect(image_bgr: np.ndarray) -> Tuple[str, float, dict]:
         # Update per-brand max
         best_inliers_per_brand[r.brand] = max(best_inliers_per_brand.get(r.brand, 0), inliers)
 
-        # Update global best (for debug)
+        # Update global best
         if inliers > best_inliers:
             best_inliers = inliers
             best_brand = r.brand
@@ -236,7 +229,6 @@ def detect(image_bgr: np.ndarray) -> Tuple[str, float, dict]:
             best_poly = _project_ref_corners(r.shape, H) if H is not None else None
 
     # Threshold: how many inliers to accept as a confident detection
-    # With few refs and noisy scenes, 10-15 is a reasonable start.
     min_inliers = 12
     if best_inliers < min_inliers:
         result_brand = "unknown"
@@ -249,7 +241,6 @@ def detect(image_bgr: np.ndarray) -> Tuple[str, float, dict]:
         "min_inliers": min_inliers,
         "best_inliers_per_brand": best_inliers_per_brand,
 
-        # debug for visualization
         "img_gray": img_gray,
         "kp_img": kp_img,
 
@@ -259,9 +250,9 @@ def detect(image_bgr: np.ndarray) -> Tuple[str, float, dict]:
         "best_ref_kp": best_ref.kp if best_ref else None,
 
         "best_matches": best_matches,
-        "best_inlier_mask": best_inlier_mask,  # mask for matches (1=inlier)
+        "best_inlier_mask": best_inlier_mask,
         "best_H": best_H,
-        "best_poly": best_poly,  # projected ref corners in img coords (of resized img)
+        "best_poly": best_poly, 
         "best_inliers": best_inliers,
     }
 
