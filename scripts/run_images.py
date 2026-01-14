@@ -41,8 +41,6 @@ def show_matches_window(img_name: str, brand: str, score: float, extra: dict, ma
     matches = sorted(matches, key=lambda m: m.distance)[:max_draw]
 
     # Hvis vi har inlier-mask, så farv dem i output
-    # OpenCV drawMatches accepterer matchColor, men ikke per-match farver direkte,
-    # så vi laver to drawMatches og blender: inliers og outliers.
     if inlier_mask is not None and len(inlier_mask) >= len(extra["best_matches"]):
         # Vi skal lave en mask for de matches vi har valgt (top max_draw)
         # inlier_mask matcher original match-liste, så vi mapper via index.
@@ -50,11 +48,10 @@ def show_matches_window(img_name: str, brand: str, score: float, extra: dict, ma
         original = extra["best_matches"]
         idxs = []
         for m in matches:
-            # find first exact object match (reference equality) fallback on attributes
+            # find first exact object match.
             try:
                 i = original.index(m)
             except ValueError:
-                # fallback: match by q/t/d (rare)
                 i = next((j for j, mm in enumerate(original)
                           if (mm.queryIdx == m.queryIdx and mm.trainIdx == m.trainIdx and mm.distance == m.distance)), -1)
             idxs.append(i)
@@ -107,10 +104,14 @@ def show_polygon_on_scene(img_name: str, brand: str, score: float, extra: dict):
     For at holde det enkelt, tegner vi på en resized version af originalen med samme max_dim som detect.
     """
     poly = extra.get("best_poly", None)
+    if brand == "unknown":
+        return
+
     if poly is None or len(poly) != 4:
         return
 
-    # Brug samme resize som detect: max_dim=1200 (på grayscale). Vi resizer BGR tilsvarende.
+
+    # Brug samme resize som detect: max_dim=1200
     img_bgr = extra.get("orig_bgr_for_poly", None)
     if img_bgr is None:
         return
@@ -146,7 +147,6 @@ def main():
 
         brand, score, extra = detect(img)
 
-        # Print korrekt key fra detect.py
         print(
             f"{img_path.name:25s} -> {brand:10s} "
             f"inliers={score:.0f} "
