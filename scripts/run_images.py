@@ -3,11 +3,10 @@ import sys
 import cv2
 import numpy as np
 
-
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT))
 
-from src.soda_vision.detect import detect  # noqa: E402
+from src.soda_vision.detect import detect_all, Detection  # noqa: E402
 
 TEST_DIR = ROOT / "data" / "test_images"
 
@@ -20,35 +19,96 @@ def _resize_for_screen(img, max_w=1400, max_h=800):
     return img
 
 
-def show_matches_window(img_name: str, brand: str, score: float, extra: dict, max_draw: int = 60):
-    """
-    Viser et vindue med match-linjer mellem best_ref og test-image.
-    Inliers (RANSAC) bliver grønne, outliers røde.
-    """
-    ref_gray = extra.get("best_ref_gray")
-    ref_kp = extra.get("best_ref_kp")
-    img_gray = extra.get("img_gray")
-    img_kp = extra.get("kp_img")
+def _to_int_pts(poly: np.ndarray) -> np.ndarray:
+    """poly (4,1,2) -> (4,2) int"""
+    return poly.reshape(-1, 2).astype(int)
 
-    matches = extra.get("best_matches", [])
-    inlier_mask = extra.get("best_inlier_mask", None)
 
-    if ref_gray is None or ref_kp is None or img_gray is None or img_kp is None or not matches:
-        print("  (Ingen debug-data til at tegne matches)")
+def draw_all_polygons(img_name: str, img_bgr_resized: np.ndarray, detections: list[Detection]):
+    """
+    Tegner alle detections' polygons på samme scene.
+    """
+    if not detections:
+        out = img_bgr_resized.copy()
+        cv2.putText(out, "NO DETECTIONS", (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 4, cv2.LINE_AA)
+        cv2.putText(out, "NO DETECTIONS", (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2, cv2.LINE_AA)
+
+        out = _resize_for_screen(out)
+        cv2.imshow(f"POLY: {img_name}", out)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
         return
 
-    # Sortér matches efter distance og begræns antal
+    out = img_bgr_resized.copy()
+
+    # Sortér så den stærkeste tegnes først
+    dets = sorted(detections, key=lambda d: d.inliers, reverse=True)
+
+    for det in dets:
+        pts = _to_int_pts(det.poly)
+        cv2.polylines(out, [pts], isClosed=True, color=(0, 255, 0), thickness=3)
+
+        # label ved første hjørne
+        x, y = pts[0]
+        cv2.putText(out, f"{det.brand} ({det.inliers})", (max(0, x), max(20, y - 10)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 4, cv2.LINE_AA)
+        cv2.putText(out, f"{det.brand} ({det.inliers})", (max(0, x), max(20, y - 10)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
+
+    out = _resize_for_screen(out)
+    cv2.imshow(f"POLY: {img_name}", out)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
+
+def show_matches_for_detection(
+    img_name: str,
+    det: Detection,
+    extra: dict,
+    max_draw: int = 60,
+):
+    """
+    Viser match-linjer for EN detection:
+    - ref vs scene
+    - inliers grøn, outliers rød
+    Kræver at detect_all's extra indeholder debug_per_brand (som i mit forslag).
+    """
+    dbg_list = extra.get("debug_per_brand", {}).get(det.brand, [])
+    if not dbg_list:
+        print("  (Ingen debug_per_brand for dette brand)")
+        return
+
+    # Find debug entry der matcher det.ref_path (bedste ref for denne detection)
+    dbg = next((d for d in dbg_list if d.get("best_ref_path") == det.ref_path), None)
+    if dbg is None:
+        # fallback: tag sidste debug entry der havde en homografi
+        dbg = next((d for d in reversed(dbg_list) if d.get("ref_gray") is not None and d.get("matches")), None)
+
+    if dbg is None:
+        print("  (Ingen debug-data fundet til at tegne matches for denne detection)")
+        return
+
+    ref_gray = dbg.get("ref_gray")
+    ref_kp = dbg.get("ref_kp")
+    scene_gray = dbg.get("scene_gray")
+    img_kp = dbg.get("kp_img")
+    matches = dbg.get("matches", [])
+    inlier_mask = dbg.get("inlier_mask", None)
+
+    if ref_gray is None or ref_kp is None or scene_gray is None or img_kp is None or not matches:
+        print("  (Manglende data for match-visning)")
+        return
+
     matches = sorted(matches, key=lambda m: m.distance)[:max_draw]
 
-    # Hvis vi har inlier-mask, så farv dem i output
-    if inlier_mask is not None and len(inlier_mask) >= len(extra["best_matches"]):
-        # Vi skal lave en mask for de matches vi har valgt (top max_draw)
-        # inlier_mask matcher original match-liste, så vi mapper via index.
-        # Derfor: find index i original-listen.
-        original = extra["best_matches"]
+    if inlier_mask is not None:
+        inlier_mask = np.asarray(inlier_mask).reshape(-1)
+
+        original = dbg.get("matches", [])
         idxs = []
         for m in matches:
-            # find first exact object match.
             try:
                 i = original.index(m)
             except ValueError:
@@ -58,16 +118,15 @@ def show_matches_window(img_name: str, brand: str, score: float, extra: dict, ma
 
         inliers = []
         outliers = []
-        inlier_mask = np.asarray(inlier_mask).reshape(-1)
         for m, i in zip(matches, idxs):
-            if i >= 0 and int(inlier_mask[i]) == 1:
+            if i >= 0 and i < len(inlier_mask) and int(inlier_mask[i]) == 1:
                 inliers.append(m)
             else:
                 outliers.append(m)
 
         vis_in = cv2.drawMatches(
             ref_gray, ref_kp,
-            img_gray, img_kp,
+            scene_gray, img_kp,
             inliers, None,
             matchColor=(0, 255, 0),
             singlePointColor=None,
@@ -75,7 +134,7 @@ def show_matches_window(img_name: str, brand: str, score: float, extra: dict, ma
         )
         vis_out = cv2.drawMatches(
             ref_gray, ref_kp,
-            img_gray, img_kp,
+            scene_gray, img_kp,
             outliers, None,
             matchColor=(0, 0, 255),
             singlePointColor=None,
@@ -85,48 +144,14 @@ def show_matches_window(img_name: str, brand: str, score: float, extra: dict, ma
     else:
         vis = cv2.drawMatches(
             ref_gray, ref_kp,
-            img_gray, img_kp,
+            scene_gray, img_kp,
             matches, None,
             flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS
         )
 
-    title = f"{img_name} -> {brand} (inliers={score:.0f})"
+    title = f"{img_name} | {det.brand} inliers={det.inliers} | ref={Path(det.ref_path).name}"
     vis = _resize_for_screen(vis)
     cv2.imshow(title, vis)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
-
-
-def show_polygon_on_scene(img_name: str, brand: str, score: float, extra: dict):
-    """
-    Viser scenebilledet med projiceret polygon (ref-corners) hvis homografi findes.
-    NB: polygon coords er i detect.py's resized grayscale koordinater, ikke nødvendigvis i original BGR.
-    For at holde det enkelt, tegner vi på en resized version af originalen med samme max_dim som detect.
-    """
-    poly = extra.get("best_poly", None)
-    if brand == "unknown":
-        return
-
-    if poly is None or len(poly) != 4:
-        return
-
-
-    # Brug samme resize som detect: max_dim=1200
-    img_bgr = extra.get("orig_bgr_for_poly", None)
-    if img_bgr is None:
-        return
-
-    out = img_bgr.copy()
-    pts = poly.reshape(-1, 2).astype(int)
-    cv2.polylines(out, [pts], isClosed=True, color=(0, 255, 0), thickness=3)
-
-    cv2.putText(out, f"{brand} inliers={score:.0f}", (20, 40),
-                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 4, cv2.LINE_AA)
-    cv2.putText(out, f"{brand} inliers={score:.0f}", (20, 40),
-                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2, cv2.LINE_AA)
-
-    out = _resize_for_screen(out)
-    cv2.imshow(f"POLY: {img_name}", out)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
@@ -145,16 +170,9 @@ def main():
             print(f"Kunne ikke læse: {img_path.name}")
             continue
 
-        brand, score, extra = detect(img)
+        detections, extra = detect_all(img)
 
-        print(
-            f"{img_path.name:25s} -> {brand:10s} "
-            f"inliers={score:.0f} "
-            f"best_inliers_per_brand={extra.get('best_inliers_per_brand')}"
-        )
-
-        # For polygon-visning skal vi tegne i samme resize-space som detect.
-        # Vi laver derfor en resized BGR her med samme max_dim=1200.
+        # Lav samme resized BGR til polygon-visning
         h, w = img.shape[:2]
         m = max(h, w)
         if m > 1200:
@@ -163,10 +181,22 @@ def main():
         else:
             img_resized = img
 
-        extra["orig_bgr_for_poly"] = img_resized
+        # Print summary
+        per_brand = {}
+        for d in detections:
+            per_brand[d.brand] = per_brand.get(d.brand, 0) + 1
 
-        show_matches_window(img_path.name, brand, score, extra, max_draw=60)
-        show_polygon_on_scene(img_path.name, brand, score, extra)
+        print(
+            f"{img_path.name:25s} -> detections={len(detections):2d} "
+            f"per_brand={per_brand}"
+        )
+
+        # Vis alle ROIs på scenen
+        draw_all_polygons(img_path.name, img_resized, detections)
+
+        # vis matches pr detection
+        for d in sorted(detections, key=lambda x: x.inliers, reverse=True):
+            show_matches_for_detection(img_path.name, d, extra, max_draw=60)
 
 
 if __name__ == "__main__":
